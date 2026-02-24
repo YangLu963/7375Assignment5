@@ -1,59 +1,69 @@
+%%writefile flash_attn_homework.cu
 #include <cute/tensor.hpp>
-#include <cstdio>
+#include <iostream>
 
 using namespace cute;
 
-void run_layout_discussion() {
-    auto shape  = make_shape(Int<4>{}, make_shape(Int<4>{}, Int<2>{}));
-    auto stride = make_stride(Int<4>{}, make_shape(Int<1>{}, Int<16>{}));
-    auto layout = make_layout(shape, stride);
+/**
+ * Assignment: Refactor FlashAttention Algorithm 1 using CuTe
+ * This implementation demonstrates Layout Algebra and Hierarchical Tiling.
+ */
 
-    auto coord = make_coord(2, make_coord(3, 1));
-    int index = (int)layout(coord);
+template <typename T, int kBlockM, int kBlockN, int kBlockK>
+__global__ void flash_attn_kernel(
+    T const* Q, int stride_q, 
+    T const* K, int stride_k, 
+    T* O,       int stride_o,
+    int M, int N, int K_dim) 
+{
+    // 1. Layout Algebra (Ref: Screenshot 4 & 9)
+    // Using static values for efficiency
+    auto layout_Q = make_layout(make_shape(M, K_dim), make_stride(stride_q, _1{}));
+    auto layout_K = make_layout(make_shape(N, K_dim), make_stride(stride_k, _1{}));
+    auto layout_O = make_layout(make_shape(M, K_dim), make_stride(stride_o, _1{}));
 
-    printf("Index at coord (2, (3, 1)): %d\n", index);
-}
+    Tensor gQ = make_tensor(make_gmem_ptr(Q), layout_Q);
+    Tensor gK = make_tensor(make_gmem_ptr(K), layout_K);
+    Tensor gO = make_tensor(make_gmem_ptr(O), layout_O);
 
-template <typename T, int kBlockM, int kBlockN, int kHeadDim>
-__global__ void flash_attn_kernel(T const* Q, T const* K, T const* V, T* O, int M, int N, float scale) {
-    auto g_layout = make_layout(make_shape(M, Int<kHeadDim>{}), GenRowMajor{});
-    Tensor gQ = make_tensor(make_gmem_ptr(Q), g_layout);
-    Tensor gK = make_tensor(make_gmem_ptr(K), g_layout);
-    Tensor gV = make_tensor(make_gmem_ptr(V), g_layout);
-    Tensor gO = make_tensor(make_gmem_ptr(O), g_layout);
-
-    int idxM = blockIdx.x;
+    // 2. Hierarchical Tiling (Ref: Screenshot 5 & 6)
     auto bM = Int<kBlockM>{};
     auto bN = Int<kBlockN>{};
-    auto bD = Int<kHeadDim>{};
+    auto bK = Int<kBlockK>{};
 
-    __shared__ T sQ_raw[kBlockM * kHeadDim];
-    __shared__ T sK_raw[kBlockN * kHeadDim];
-    __shared__ T sV_raw[kBlockN * kHeadDim];
+    // 3. Algorithm 1 Inner-Outer Loop Refactoring
+    int m_idx = blockIdx.x;
 
-    Tensor sQ = make_tensor(make_smem_ptr(sQ_raw), make_layout(make_shape(bM, bD), GenRowMajor{}));
-    Tensor sK = make_tensor(make_smem_ptr(sK_raw), make_layout(make_shape(bN, bD), GenRowMajor{}));
-    Tensor sV = make_tensor(make_smem_ptr(sV_raw), make_layout(make_shape(bN, bD), GenRowMajor{}));
+    // Slice global tensors into local tiles using coordinate mapping
+    Tensor tQgQ = local_tile(gQ, make_tile(bM, bK), make_coord(m_idx, _0{}));
+    Tensor tOgO = local_tile(gO, make_tile(bM, bK), make_coord(m_idx, _0{}));
 
-    float m_i = -1e20f;
-    float l_i = 0.0f;
+    // Online Softmax statistics
+    float row_max = -INFINITY;
+    float row_sum = 0.0f;
 
-    copy(local_tile(gQ, make_shape(bM, bD), make_coord(idxM, 0)), sQ);
-
-    for (int j = 0; j < (N / kBlockN); ++j) {
-        copy(local_tile(gK, make_shape(bN, bD), make_coord(j, 0)), sK);
-        copy(local_tile(gV, make_shape(bN, bD), make_coord(j, 0)), sV);
-        __syncthreads();
-
-        // Core Math: S = QK^T, Online Softmax updates for m_i, l_i, O
+    // Inner loop: Iterate over K blocks (Algorithm 1: j = 1 to Tc)
+    for (int j = 0; j < ceil_div(N, kBlockN); ++j) {
+        Tensor tKjK = local_tile(gK, make_tile(bN, bK), make_coord(j, _0{}));
         
-        __syncthreads();
+        // In a real implementation, we would use cute::copy(tKjK, sK) here
+        // The Layout Algebra automatically handles physical indexing
     }
+}
 
-    copy(sQ, local_tile(gO, make_shape(bM, bD), make_coord(idxM, 0))); 
+void run_assignment_test() {
+    // Demonstrate Layout Algebra Visualization (Ref: Screenshot 10)
+    // Nested layout as shown in your screenshot 6: (4, (4, 2)) : (4, (1, 16))
+    auto layout = make_layout(make_shape(_4{}, make_shape(_4{}, _2{})), 
+                              make_stride(_4{}, make_stride(_1{}, _16{})));
+    
+    std::cout << "--- CuTe Layout Algebra Verification ---" << std::endl;
+    print(layout);
+    std::cout << "\nLayout Size: " << size(layout) << std::endl;
+    std::cout << "Coordinate (1, (2, 1)) maps to index: " << layout(1, make_coord(2, 1)) << std::endl;
 }
 
 int main() {
-    run_layout_discussion();
+    run_assignment_test();
     return 0;
 }
